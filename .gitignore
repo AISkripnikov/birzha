@@ -1,0 +1,4 @@
+__pycache__/
+finam/cache/
+finam/paper_state.json
+finam/live_state.json
