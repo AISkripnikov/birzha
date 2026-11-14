@@ -13,6 +13,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 BASE = "https://api.finam.ru/v1"
+MSK = timezone(timedelta(hours=3))
 
 
 class FinamError(Exception):
@@ -70,24 +71,44 @@ class Finam:
         self.jwt_time = time.time()
 
     # --- рыночные данные -----------------------------------------------------
-    def bars(self, symbol, days=400, timeframe="TIME_FRAME_D"):
-        """Дневные свечи за последние `days` дней (API отдаёт ≤365 дней за запрос — режем на куски)."""
+    def candles(self, symbol, timeframe="TIME_FRAME_D", days=400):
+        """Свечи за последние `days` дней. Время свечи (начало) — в МСК, формат "YYYY-MM-DD HH:MM".
+
+        Глубина у Финама: M1 — 7 дней, M5…H8 — 30 дней, D — 365 дней за запрос (режем на куски).
+        """
+        chunk = 360 if timeframe in ("TIME_FRAME_D", "TIME_FRAME_W", "TIME_FRAME_MN") else 7
         end = datetime.now(timezone.utc) + timedelta(days=1)
         start = end - timedelta(days=days)
         out, chunk_start = {}, start
         while chunk_start < end:
-            chunk_end = min(chunk_start + timedelta(days=360), end)
+            chunk_end = min(chunk_start + timedelta(days=chunk), end)
             r = self._request("GET", f"/instruments/{symbol}/bars", params={
                 "timeframe": timeframe,
                 "interval.start_time": _iso(chunk_start),
                 "interval.end_time": _iso(chunk_end),
             })
             for b in r.get("bars", []):
-                d = b["timestamp"][:10]
-                out[d] = {"date": d, "open": _dec(b["open"]), "high": _dec(b["high"]),
+                ts = datetime.fromisoformat(b["timestamp"].replace("Z", "+00:00")).astimezone(MSK)
+                t = ts.strftime("%Y-%m-%d %H:%M")
+                out[t] = {"t": t, "date": t[:10], "open": _dec(b["open"]), "high": _dec(b["high"]),
                           "low": _dec(b["low"]), "close": _dec(b["close"]), "volume": _dec(b["volume"])}
             chunk_start = chunk_end
-        return [out[d] for d in sorted(out)]
+        return [out[t] for t in sorted(out)]
+
+    def bars(self, symbol, days=400, timeframe="TIME_FRAME_D"):
+        """Дневные свечи (для дневной стратегии на акциях)."""
+        return self.candles(symbol, timeframe, days)
+
+    def find(self, ticker):
+        """Поиск символа: find("USDRUBF") → ["USDRUBF@RTSX", ...]. Помогает узнать правильный MIC."""
+        r = self._request("GET", "/assets")
+        return [a["symbol"] for a in r.get("assets", []) if a.get("ticker", "").upper() == ticker.upper()]
+
+    def margin(self, symbol):
+        """Гарантийное обеспечение (ГО) на 1 контракт в рублях, если брокер его отдаёт."""
+        r = self._request("GET", f"/assets/{symbol}/params", params={"account_id": self.account_id})
+        c = r.get("long_collateral") or {}
+        return float(c.get("units", 0)) + c.get("nanos", 0) / 1e9
 
     def last_price(self, symbol):
         q = self._request("GET", f"/instruments/{symbol}/quotes/latest").get("quote", {})
@@ -122,9 +143,15 @@ class Finam:
                             "type": "ORDER_TYPE_MARKET", "time_in_force": "TIME_IN_FORCE_DAY",
                             "comment": comment})
 
-    def stop_sell(self, symbol, qty, stop_price, comment="birzha-stop"):
-        """Стоп-заявка на продажу по рынку, если цена опустится до stop_price. Действует до отмены."""
-        return self._place({"symbol": symbol, "quantity": {"value": str(int(qty))}, "side": "SIDE_SELL",
-                            "type": "ORDER_TYPE_STOP", "stop_price": {"value": f"{stop_price:.4f}"},
-                            "stop_condition": "STOP_CONDITION_LAST_DOWN",
+    def stop_order(self, symbol, qty, side, stop_price, comment="birzha-stop"):
+        """Стоп по рынку, действует до отмены.
+        side="SIDE_SELL" — стоп для лонга (сработает при падении до stop_price),
+        side="SIDE_BUY"  — стоп для шорта (сработает при росте до stop_price)."""
+        cond = "STOP_CONDITION_LAST_DOWN" if side == "SIDE_SELL" else "STOP_CONDITION_LAST_UP"
+        return self._place({"symbol": symbol, "quantity": {"value": str(int(qty))}, "side": side,
+                            "type": "ORDER_TYPE_STOP", "stop_price": {"value": f"{stop_price:.6g}"},
+                            "stop_condition": cond,
                             "valid_before": "VALID_BEFORE_GOOD_TILL_CANCEL", "comment": comment})
+
+    def stop_sell(self, symbol, qty, stop_price, comment="birzha-stop"):
+        return self.stop_order(symbol, qty, "SIDE_SELL", stop_price, comment)
