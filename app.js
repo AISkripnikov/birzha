@@ -1,17 +1,82 @@
 (function () {
-  const API = 'https://data-api.binance.vision/api/v3';
-  const WS = 'wss://data-stream.binance.vision/ws';
+  const toCandle = (t, o, h, l, c, v) => ({ time: t / 1000, open: +o, high: +h, low: +l, close: +c, volume: +v });
+  async function getJson(url) {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`биржа ответила ${r.status}`);
+    return r.json();
+  }
+
+  // ---------- биржи ----------
+  // Bybit: если страница открыта через server.py (http://localhost), запросы идут через него —
+  // так не мешают браузерные ограничения CORS. Если открыта файлом — напрямую.
+  const BYBIT_API = location.protocol.startsWith('http') ? '/bybit' : 'https://api.bybit.com';
+  const BYBIT_IV = { '15m': '15', '1h': '60', '4h': '240', '1d': 'D' };
+
+  const EXCHANGES = {
+    bybit: {
+      name: 'Bybit',
+      async klines(symbol, interval, limit) {
+        const j = await getJson(`${BYBIT_API}/v5/market/kline?category=spot&symbol=${symbol}&interval=${BYBIT_IV[interval]}&limit=${limit}`);
+        if (j.retCode !== 0) throw new Error(j.retMsg);
+        return j.result.list.map((k) => toCandle(+k[0], k[1], k[2], k[3], k[4], k[5])).reverse(); // Bybit отдаёт новые первыми
+      },
+      async change24h() {
+        const j = await getJson(`${BYBIT_API}/v5/market/tickers?category=spot`);
+        const out = {};
+        j.result.list.forEach((t) => (out[t.symbol] = +t.price24hPcnt * 100));
+        return out;
+      },
+      stream(symbol, interval, onCandle, onOpen) {
+        const ws = new WebSocket('wss://stream.bybit.com/v5/public/spot');
+        let ping;
+        ws.onopen = () => {
+          ws.send(JSON.stringify({ op: 'subscribe', args: [`kline.${BYBIT_IV[interval]}.${symbol}`] }));
+          ping = setInterval(() => ws.readyState === 1 && ws.send('{"op":"ping"}'), 20000);
+          onOpen();
+        };
+        ws.onmessage = (e) => {
+          const m = JSON.parse(e.data);
+          if (m.topic && m.data) m.data.forEach((k) => onCandle(toCandle(k.start, k.open, k.high, k.low, k.close, k.volume)));
+        };
+        ws.addEventListener('close', () => clearInterval(ping));
+        return ws;
+      },
+    },
+    binance: {
+      name: 'Binance',
+      async klines(symbol, interval, limit) {
+        const raw = await getJson(`https://data-api.binance.vision/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
+        return raw.map((k) => toCandle(k[0], k[1], k[2], k[3], k[4], k[5]));
+      },
+      async change24h(symbols) {
+        const j = await getJson(`https://data-api.binance.vision/api/v3/ticker/24hr?symbols=${encodeURIComponent(JSON.stringify(symbols))}`);
+        const out = {};
+        j.forEach((t) => (out[t.symbol] = +t.priceChangePercent));
+        return out;
+      },
+      stream(symbol, interval, onCandle, onOpen) {
+        const ws = new WebSocket(`wss://data-stream.binance.vision/ws/${symbol.toLowerCase()}@kline_${interval}`);
+        ws.onopen = onOpen;
+        ws.onmessage = (e) => { const k = JSON.parse(e.data).k; onCandle(toCandle(k.t, k.o, k.h, k.l, k.c, k.v)); };
+        return ws;
+      },
+    },
+  };
+  const ex = () => EXCHANGES[state.exchange];
+
   const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT', 'ADAUSDT', 'TONUSDT',
     'AVAXUSDT', 'LINKUSDT', 'DOTUSDT', 'TRXUSDT', 'LTCUSDT', 'NEARUSDT', 'SUIUSDT', 'APTUSDT'];
 
   const $ = (id) => document.getElementById(id);
-  const state = { symbol: 'BTCUSDT', interval: '4h', candles: [], ws: null, lastRender: 0 };
+  const state = { exchange: 'bybit', symbol: 'BTCUSDT', interval: '4h', candles: [], ws: null, lastRender: 0 };
 
   // ---------- настройки (запоминаем в браузере) ----------
   function load(key, def) { try { return localStorage.getItem(key) ?? def; } catch { return def; } }
   function save(key, val) { try { localStorage.setItem(key, val); } catch { /* приватный режим */ } }
 
   SYMBOLS.forEach((s) => $('symbol').add(new Option(s.replace('USDT', ' / USDT'), s)));
+  state.exchange = EXCHANGES[load('exchange', 'bybit')] ? load('exchange', 'bybit') : 'bybit';
+  $('exchange').value = state.exchange;
   state.symbol = load('symbol', 'BTCUSDT');
   state.interval = load('interval', '4h');
   $('symbol').value = state.symbol;
@@ -27,12 +92,7 @@
   const cls = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : 'zero');
 
   // ---------- данные ----------
-  async function fetchKlines(symbol, interval, limit = 500) {
-    const r = await fetch(`${API}/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
-    if (!r.ok) throw new Error(`Binance ответил ${r.status}`);
-    const raw = await r.json();
-    return raw.map((k) => ({ time: k[0] / 1000, open: +k[1], high: +k[2], low: +k[3], close: +k[4], volume: +k[5] }));
-  }
+  const fetchKlines = (symbol, interval, limit = 500) => ex().klines(symbol, interval, limit);
 
   // ---------- графики ----------
   const chartOpts = {
@@ -170,12 +230,7 @@
   // ---------- живые обновления ----------
   function connectWs() {
     if (state.ws) { state.ws.onclose = null; state.ws.close(); }
-    const ws = new WebSocket(`${WS}/${state.symbol.toLowerCase()}@kline_${state.interval}`);
-    state.ws = ws;
-    ws.onopen = () => setStatus('онлайн · обновляется в реальном времени', 'live');
-    ws.onmessage = (e) => {
-      const k = JSON.parse(e.data).k;
-      const c = { time: k.t / 1000, open: +k.o, high: +k.h, low: +k.l, close: +k.c, volume: +k.v };
+    const onCandle = (c) => {
       const arr = state.candles;
       if (!arr.length) return;
       if (arr.at(-1).time === c.time) arr[arr.length - 1] = c;
@@ -183,6 +238,9 @@
       const now = Date.now();
       if (now - state.lastRender > 1000) { state.lastRender = now; render(false); }
     };
+    const ws = ex().stream(state.symbol, state.interval, onCandle,
+      () => setStatus(`${ex().name} · онлайн · обновляется в реальном времени`, 'live'));
+    state.ws = ws;
     ws.onclose = () => { setStatus('соединение потеряно, переподключаюсь…'); setTimeout(connectWs, 3000); };
   }
 
@@ -196,7 +254,10 @@
       chart.timeScale().setVisibleLogicalRange({ from: state.candles.length - 150, to: state.candles.length + 5 });
       connectWs();
     } catch (e) {
-      setStatus('Ошибка загрузки: ' + e.message + '. Возможно, Binance недоступен из вашей сети.', 'err');
+      const hint = state.exchange === 'bybit' && location.protocol === 'file:'
+        ? ' Запустите страницу через server.py (см. README) или выберите Binance.'
+        : ` Возможно, ${ex().name} недоступен из вашей сети.`;
+      setStatus(`Ошибка загрузки (${ex().name}): ${e.message}.${hint}`, 'err');
     }
   }
 
@@ -206,10 +267,7 @@
     tbody.innerHTML = `<tr><td colspan="8" class="zero">Сканирую ${SYMBOLS.length} монет…</td></tr>`;
     const { deposit, riskPct } = settings();
     let tickers = {};
-    try {
-      const r = await fetch(`${API}/ticker/24hr?symbols=${encodeURIComponent(JSON.stringify(SYMBOLS))}`);
-      (await r.json()).forEach((t) => (tickers[t.symbol] = +t.priceChangePercent));
-    } catch { /* без суточного изменения */ }
+    try { tickers = await ex().change24h(SYMBOLS); } catch { /* без суточного изменения */ }
 
     const rows = await Promise.all(SYMBOLS.map(async (sym) => {
       try {
@@ -242,6 +300,7 @@
   }
 
   // ---------- события ----------
+  $('exchange').addEventListener('change', (e) => { state.exchange = e.target.value; save('exchange', state.exchange); loadMain(); scan(); });
   $('symbol').addEventListener('change', (e) => { state.symbol = e.target.value; save('symbol', state.symbol); loadMain(); });
   $('interval').addEventListener('change', (e) => { state.interval = e.target.value; save('interval', state.interval); loadMain(); scan(); });
   for (const id of ['deposit', 'risk']) $(id).addEventListener('input', (e) => { save(id, e.target.value); render(false); });

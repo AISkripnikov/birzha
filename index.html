@@ -9,11 +9,17 @@
 </head>
 <body>
   <header>
-    <h1>Биржевой помощник <span class="sub">крипта · Binance · свечи и индикаторы</span></h1>
+    <h1>Биржевой помощник <span class="sub">крипта · Bybit / Binance · свечи и индикаторы</span></h1>
     <div class="status" id="status">загрузка…</div>
   </header>
 
   <section class="controls">
+    <label>Биржа
+      <select id="exchange">
+        <option value="bybit">Bybit</option>
+        <option value="binance">Binance</option>
+      </select>
+    </label>
     <label>Монета
       <select id="symbol"></select>
     </label>
