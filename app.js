@@ -1,273 +1,311 @@
 (function () {
-  const toCandle = (t, o, h, l, c, v) => ({ time: t / 1000, open: +o, high: +h, low: +l, close: +c, volume: +v });
-  async function getJson(url) {
-    const r = await fetch(url);
-    if (!r.ok) throw new Error(`биржа ответила ${r.status}`);
-    return r.json();
+  // ================= Bybit =================
+  // Если страница открыта через server.py (http://localhost) — запросы идут через него (обход CORS).
+  const API = location.protocol.startsWith('http') ? '/bybit' : 'https://api.bybit.com';
+  const WS_URL = 'wss://stream.bybit.com/v5/public/spot';
+  const IV = { '15m': '15', '1h': '60', '4h': '240', '1d': 'D' };
+  const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'BNBUSDT', 'DOGEUSDT', 'TONUSDT', 'ADAUSDT',
+    'AVAXUSDT', 'LINKUSDT', 'SUIUSDT', 'TRXUSDT', 'DOTUSDT', 'LTCUSDT', 'NEARUSDT', 'APTUSDT'];
+
+  async function api(path) {
+    const r = await fetch(API + path);
+    if (!r.ok) throw new Error(`Bybit ответил ${r.status}`);
+    const j = await r.json();
+    if (j.retCode !== 0) throw new Error(j.retMsg || 'ошибка Bybit');
+    return j.result;
+  }
+  const toCandle = (t, o, h, l, c, v) => ({ time: +t / 1000, open: +o, high: +h, low: +l, close: +c, volume: +v });
+
+  async function fetchKlines(symbol, interval, limit = 500) {
+    const res = await api(`/v5/market/kline?category=spot&symbol=${symbol}&interval=${IV[interval]}&limit=${limit}`);
+    return res.list.map((k) => toCandle(k[0], k[1], k[2], k[3], k[4], k[5])).reverse(); // Bybit отдаёт новые первыми
+  }
+  async function fetchTickers() {
+    const res = await api('/v5/market/tickers?category=spot');
+    const out = {};
+    for (const t of res.list) if (SYMBOLS.includes(t.symbol)) out[t.symbol] = {
+      price: +t.lastPrice, chg: +t.price24hPcnt * 100, high: +t.highPrice24h, low: +t.lowPrice24h, turnover: +t.turnover24h,
+    };
+    return out;
   }
 
-  // ---------- биржи ----------
-  // Bybit: если страница открыта через server.py (http://localhost), запросы идут через него —
-  // так не мешают браузерные ограничения CORS. Если открыта файлом — напрямую.
-  const BYBIT_API = location.protocol.startsWith('http') ? '/bybit' : 'https://api.bybit.com';
-  const BYBIT_IV = { '15m': '15', '1h': '60', '4h': '240', '1d': 'D' };
-
-  const EXCHANGES = {
-    bybit: {
-      name: 'Bybit',
-      async klines(symbol, interval, limit) {
-        const j = await getJson(`${BYBIT_API}/v5/market/kline?category=spot&symbol=${symbol}&interval=${BYBIT_IV[interval]}&limit=${limit}`);
-        if (j.retCode !== 0) throw new Error(j.retMsg);
-        return j.result.list.map((k) => toCandle(+k[0], k[1], k[2], k[3], k[4], k[5])).reverse(); // Bybit отдаёт новые первыми
-      },
-      async change24h() {
-        const j = await getJson(`${BYBIT_API}/v5/market/tickers?category=spot`);
-        const out = {};
-        j.result.list.forEach((t) => (out[t.symbol] = +t.price24hPcnt * 100));
-        return out;
-      },
-      stream(symbol, interval, onCandle, onOpen) {
-        const ws = new WebSocket('wss://stream.bybit.com/v5/public/spot');
-        let ping;
-        ws.onopen = () => {
-          ws.send(JSON.stringify({ op: 'subscribe', args: [`kline.${BYBIT_IV[interval]}.${symbol}`] }));
-          ping = setInterval(() => ws.readyState === 1 && ws.send('{"op":"ping"}'), 20000);
-          onOpen();
-        };
-        ws.onmessage = (e) => {
-          const m = JSON.parse(e.data);
-          if (m.topic && m.data) m.data.forEach((k) => onCandle(toCandle(k.start, k.open, k.high, k.low, k.close, k.volume)));
-        };
-        ws.addEventListener('close', () => clearInterval(ping));
-        return ws;
-      },
-    },
-    binance: {
-      name: 'Binance',
-      async klines(symbol, interval, limit) {
-        const raw = await getJson(`https://data-api.binance.vision/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
-        return raw.map((k) => toCandle(k[0], k[1], k[2], k[3], k[4], k[5]));
-      },
-      async change24h(symbols) {
-        const j = await getJson(`https://data-api.binance.vision/api/v3/ticker/24hr?symbols=${encodeURIComponent(JSON.stringify(symbols))}`);
-        const out = {};
-        j.forEach((t) => (out[t.symbol] = +t.priceChangePercent));
-        return out;
-      },
-      stream(symbol, interval, onCandle, onOpen) {
-        const ws = new WebSocket(`wss://data-stream.binance.vision/ws/${symbol.toLowerCase()}@kline_${interval}`);
-        ws.onopen = onOpen;
-        ws.onmessage = (e) => { const k = JSON.parse(e.data).k; onCandle(toCandle(k.t, k.o, k.h, k.l, k.c, k.v)); };
-        return ws;
-      },
-    },
-  };
-  const ex = () => EXCHANGES[state.exchange];
-
-  const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT', 'ADAUSDT', 'TONUSDT',
-    'AVAXUSDT', 'LINKUSDT', 'DOTUSDT', 'TRXUSDT', 'LTCUSDT', 'NEARUSDT', 'SUIUSDT', 'APTUSDT'];
-
+  // ================= состояние =================
   const $ = (id) => document.getElementById(id);
-  const state = { exchange: 'bybit', symbol: 'BTCUSDT', interval: '4h', candles: [], ws: null, lastRender: 0 };
+  const store = {
+    get(k, d) { try { return localStorage.getItem(k) ?? d; } catch { return d; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch { /* приватный режим */ } },
+  };
+  const state = {
+    symbol: SYMBOLS.includes(store.get('symbol')) ? store.get('symbol') : 'BTCUSDT',
+    interval: IV[store.get('interval')] ? store.get('interval') : '4h',
+    candles: [], tickers: {}, ws: null, lastRender: 0,
+  };
+  $('deposit').value = store.get('deposit', '1000');
+  $('risk').value = store.get('risk', '1');
 
-  // ---------- настройки (запоминаем в браузере) ----------
-  function load(key, def) { try { return localStorage.getItem(key) ?? def; } catch { return def; } }
-  function save(key, val) { try { localStorage.setItem(key, val); } catch { /* приватный режим */ } }
-
-  SYMBOLS.forEach((s) => $('symbol').add(new Option(s.replace('USDT', ' / USDT'), s)));
-  state.exchange = EXCHANGES[load('exchange', 'bybit')] ? load('exchange', 'bybit') : 'bybit';
-  $('exchange').value = state.exchange;
-  state.symbol = load('symbol', 'BTCUSDT');
-  state.interval = load('interval', '4h');
-  $('symbol').value = state.symbol;
-  $('interval').value = state.interval;
-  $('deposit').value = load('deposit', '1000');
-  $('risk').value = load('risk', '1');
-
-  // ---------- форматирование ----------
-  const fmtPrice = (p) => p >= 1000 ? p.toLocaleString('ru-RU', { maximumFractionDigits: 2 })
-    : p >= 1 ? p.toFixed(4) : p.toPrecision(4);
-  const fmtMoney = (m) => m.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) + ' $';
-  const fmtPct = (v) => (v > 0 ? '+' : '') + v.toFixed(2) + '%';
+  // ================= формат =================
+  const nf = (d) => new Intl.NumberFormat('ru-RU', { minimumFractionDigits: d, maximumFractionDigits: d });
+  const fmtPrice = (p) => p == null || isNaN(p) ? '—' : p >= 1000 ? nf(2).format(p) : p >= 1 ? nf(4).format(p) : nf(Math.min(8, 3 - Math.floor(Math.log10(p)))).format(p);
+  const fmtMoney = (m) => nf(2).format(m) + ' $';
+  const fmtPct = (v) => (v > 0 ? '+' : v < 0 ? '−' : '') + nf(2).format(Math.abs(v)) + '%';
+  const fmtBig = (v) => v >= 1e9 ? nf(2).format(v / 1e9) + ' млрд $' : v >= 1e6 ? nf(1).format(v / 1e6) + ' млн $' : nf(0).format(v) + ' $';
   const cls = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : 'zero');
+  const base = (s) => s.replace('USDT', '');
+  const coinColor = (s) => { let h = 0; for (const ch of s) h = (h * 31 + ch.charCodeAt(0)) % 360; return `hsl(${h} 75% 62%)`; };
+  const COLORS = { BTC: '#f7931a', ETH: '#8c9eff', SOL: '#9b6bff', XRP: '#9fb3c8', BNB: '#f3ba2f', DOGE: '#d9b44a', TON: '#3aa7ff', ADA: '#4f7dff',
+    AVAX: '#ff5a5f', LINK: '#4a7dff', SUI: '#6fbcf0', TRX: '#ff4d4f', DOT: '#ff4fa3', LTC: '#b8c2d1', NEAR: '#5ee6b0', APT: '#4fd1c5' };
+  const abbr = (s) => (base(s).length <= 3 ? base(s) : base(s)[0]);
+  const icon = (s, cl) => `<span class="${cl}" style="background:${COLORS[base(s)] || coinColor(s)}">${abbr(s)}</span>`;
 
-  // ---------- данные ----------
-  const fetchKlines = (symbol, interval, limit = 500) => ex().klines(symbol, interval, limit);
+  function setStatus(text, kind = '') { $('statusText').textContent = text; $('status').className = 'pill ' + kind; }
 
-  // ---------- графики ----------
+  // ================= лента монет =================
+  function renderTicker() {
+    $('ticker').innerHTML = SYMBOLS.map((s) => {
+      const t = state.tickers[s];
+      return `<button class="tk ${s === state.symbol ? 'active' : ''}" data-sym="${s}">
+        ${icon(s, 'tk-ico')}
+        <span><div class="tk-sym">${base(s)}</div><div class="tk-price">${t ? fmtPrice(t.price) : '…'}</div></span>
+        <span class="tk-chg ${t ? cls(t.chg) : ''}">${t ? fmtPct(t.chg) : ''}</span>
+      </button>`;
+    }).join('');
+  }
+  $('ticker').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-sym]');
+    if (b) selectSymbol(b.dataset.sym);
+  });
+
+  function renderHero(livePrice) {
+    const t = state.tickers[state.symbol];
+    $('heroIcon').style.background = COLORS[base(state.symbol)] || coinColor(state.symbol);
+    $('heroIcon').textContent = abbr(state.symbol);
+    $('heroSym').textContent = base(state.symbol);
+    const price = livePrice ?? t?.price;
+    $('heroPrice').textContent = fmtPrice(price);
+    if (t) {
+      $('heroChg').textContent = fmtPct(t.chg);
+      $('heroChg').className = 'chg ' + cls(t.chg);
+      $('heroHigh').textContent = fmtPrice(t.high);
+      $('heroLow').textContent = fmtPrice(t.low);
+      $('heroVol').textContent = fmtBig(t.turnover);
+    }
+    document.title = `${fmtPrice(price)} · ${base(state.symbol)} — Birzha`;
+  }
+
+  async function refreshTickers() {
+    try { state.tickers = await fetchTickers(); renderTicker(); renderHero(state.candles.at(-1)?.close); } catch { /* не критично */ }
+  }
+
+  // ================= графики =================
   const chartOpts = {
-    layout: { background: { color: 'transparent' }, textColor: '#8b949e' },
-    grid: { vertLines: { color: '#1f262f' }, horzLines: { color: '#1f262f' } },
-    timeScale: { timeVisible: true, borderColor: '#2a313c' },
-    rightPriceScale: { borderColor: '#2a313c' },
-    crosshair: { mode: 0 },
+    layout: { background: { color: 'transparent' }, textColor: '#7d8799', fontFamily: 'Inter, system-ui, sans-serif', fontSize: 11 },
+    grid: { vertLines: { color: 'rgba(255,255,255,.035)' }, horzLines: { color: 'rgba(255,255,255,.035)' } },
+    timeScale: { timeVisible: true, borderColor: '#1f2635', rightOffset: 6 },
+    rightPriceScale: { borderColor: '#1f2635' },
+    crosshair: { mode: 0, vertLine: { color: '#3a4458', labelBackgroundColor: '#2a3346' }, horzLine: { color: '#3a4458', labelBackgroundColor: '#2a3346' } },
+    localization: { locale: 'ru-RU' },
     autoSize: true,
   };
-  const chart = LightweightCharts.createChart($('chart'), chartOpts);
+  const chart = LightweightCharts.createChart($('chart'), { ...chartOpts, rightPriceScale: { ...chartOpts.rightPriceScale, scaleMargins: { top: 0.12, bottom: 0.2 } } });
   const candleSeries = chart.addCandlestickSeries({
-    upColor: '#22c55e', downColor: '#ef4444', wickUpColor: '#22c55e', wickDownColor: '#ef4444', borderVisible: false,
+    upColor: '#20b26c', downColor: '#f6465d', wickUpColor: '#20b26c', wickDownColor: '#f6465d', borderVisible: false,
   });
-  const line = (color, extra = {}) => chart.addLineSeries({ color, lineWidth: 1.5, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, ...extra });
-  const s = {
-    ema20: line('#f0b90b'), ema50: line('#3b82f6'), ema200: line('#a855f7'),
-    bbU: line('#8b949e', { lineStyle: 2, lineWidth: 1 }), bbL: line('#8b949e', { lineStyle: 2, lineWidth: 1 }),
+  const volSeries = chart.addHistogramSeries({ priceScaleId: 'vol', priceFormat: { type: 'volume' }, lastValueVisible: false, priceLineVisible: false });
+  chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.84, bottom: 0 } });
+  const line = (color, extra = {}) => chart.addLineSeries({ color, lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, ...extra });
+  const S = {
+    ema20: line('#ffc24b', { lineWidth: 1.5 }), ema50: line('#4f8cff', { lineWidth: 1.5 }), ema200: line('#b57bff', { lineWidth: 1.5 }),
+    bbU: line('rgba(140,150,170,.55)', { lineStyle: 2, lineWidth: 1 }), bbL: line('rgba(140,150,170,.55)', { lineStyle: 2, lineWidth: 1 }),
   };
-  const stopLine = { stop: null, take: null };
+  const planLines = [];
 
-  const rsiChart = LightweightCharts.createChart($('rsiChart'), { ...chartOpts, timeScale: { ...chartOpts.timeScale, visible: false } });
-  const rsiSeries = rsiChart.addLineSeries({ color: '#f0b90b', lineWidth: 1.5, priceLineVisible: false });
-  rsiSeries.createPriceLine({ price: 70, color: '#ef4444', lineStyle: 2, lineWidth: 1, axisLabelVisible: false });
-  rsiSeries.createPriceLine({ price: 30, color: '#22c55e', lineStyle: 2, lineWidth: 1, axisLabelVisible: false });
+  const rsiChart = LightweightCharts.createChart($('rsiChart'), { ...chartOpts, timeScale: { ...chartOpts.timeScale, visible: false }, handleScroll: false, handleScale: false });
+  const rsiSeries = rsiChart.addLineSeries({ color: '#ffc24b', lineWidth: 1.5, priceLineVisible: false });
+  rsiSeries.createPriceLine({ price: 70, color: 'rgba(246,70,93,.6)', lineStyle: 2, lineWidth: 1, axisLabelVisible: false });
+  rsiSeries.createPriceLine({ price: 30, color: 'rgba(32,178,108,.6)', lineStyle: 2, lineWidth: 1, axisLabelVisible: false });
   chart.timeScale().subscribeVisibleLogicalRangeChange((r) => r && rsiChart.timeScale().setVisibleLogicalRange(r));
 
   const toLine = (arr) => state.candles.map((c, i) => (arr[i] == null ? null : { time: c.time, value: arr[i] })).filter(Boolean);
+  const volBar = (c) => ({ time: c.time, value: c.volume, color: c.close >= c.open ? 'rgba(32,178,108,.35)' : 'rgba(246,70,93,.35)' });
 
-  // ---------- главный расчёт и отрисовка ----------
+  function renderOhlc(c) {
+    if (!c) return;
+    const ch = ((c.close - c.open) / c.open) * 100;
+    $('ohlc').innerHTML = `<span>О <b>${fmtPrice(c.open)}</b></span><span>М <b>${fmtPrice(c.high)}</b></span>
+      <span>Н <b>${fmtPrice(c.low)}</b></span><span>З <b>${fmtPrice(c.close)}</b></span><span class="${cls(ch)}">${fmtPct(ch)}</span>`;
+  }
+  chart.subscribeCrosshairMove((p) => renderOhlc(p.time ? p.seriesData.get(candleSeries) : state.candles.at(-1)));
+
+  // ================= главный расчёт =================
   function render(full) {
     const candles = state.candles;
     if (candles.length < 210) return;
     const ind = TA.computeAll(candles);
-    const last = candles.length - 1;
+    const i = candles.length - 1, c = candles[i];
 
     if (full) {
       candleSeries.setData(candles);
-      s.ema20.setData(toLine(ind.ema20)); s.ema50.setData(toLine(ind.ema50)); s.ema200.setData(toLine(ind.ema200));
-      s.bbU.setData(toLine(ind.bb.upper)); s.bbL.setData(toLine(ind.bb.lower));
+      volSeries.setData(candles.map(volBar));
+      S.ema20.setData(toLine(ind.ema20)); S.ema50.setData(toLine(ind.ema50)); S.ema200.setData(toLine(ind.ema200));
+      S.bbU.setData(toLine(ind.bb.upper)); S.bbL.setData(toLine(ind.bb.lower));
       rsiSeries.setData(toLine(ind.rsi));
       candleSeries.setMarkers(historyMarkers(candles, ind));
       renderBacktest(candles, ind);
     } else {
-      candleSeries.update(candles[last]);
+      candleSeries.update(c);
+      volSeries.update(volBar(c));
       for (const [k, arr] of [['ema20', ind.ema20], ['ema50', ind.ema50], ['ema200', ind.ema200], ['bbU', ind.bb.upper], ['bbL', ind.bb.lower]])
-        s[k].update({ time: candles[last].time, value: arr[last] });
-      rsiSeries.update({ time: candles[last].time, value: ind.rsi[last] });
+        S[k].update({ time: c.time, value: arr[i] });
+      rsiSeries.update({ time: c.time, value: ind.rsi[i] });
     }
+    renderOhlc(c);
+    renderHero(c.close);
 
-    const { score, reasons } = TA.scoreAt(candles, ind, last);
+    const { score, reasons } = TA.scoreAt(candles, ind, i);
     const v = TA.verdict(score);
+    const k = Math.max(-1, Math.min(1, score / TA.MAX_SCORE));
+    $('needle').style.transform = `rotate(${k * 90}deg)`;
     $('verdict').textContent = v.label;
     $('verdict').className = 'verdict ' + v.cls;
-    const pos = Math.max(0, Math.min(1, (score + TA.MAX_SCORE) / (2 * TA.MAX_SCORE)));
-    $('meterFill').style.left = `calc(${pos * 100}% - 2px)`;
-    $('price').textContent = `Цена ${fmtPrice(candles[last].close)} USDT · оценка ${score > 0 ? '+' : ''}${score.toFixed(1)} из ±${TA.MAX_SCORE}`;
+    $('score').textContent = `оценка ${score > 0 ? '+' : ''}${score.toFixed(1)} из ±${TA.MAX_SCORE}`;
     $('reasons').innerHTML = reasons.map((r) =>
       `<li><span class="pts ${cls(r.pts)}">${r.pts > 0 ? '+' : ''}${r.pts}</span><span>${r.text}</span></li>`).join('');
-    $('chartTitle').textContent = `${state.symbol.replace('USDT', ' / USDT')} · ${$('interval').selectedOptions[0].text}`;
 
-    renderPlan(candles[last].close, ind.atr[last], v, score);
+    renderPlan(c.close, ind.atr[i], v, score);
   }
 
   function historyMarkers(candles, ind) {
     const markers = [];
-    let prevDir = 0;
+    let prev = 0;
     for (let i = 200; i < candles.length; i++) {
       const { score } = TA.scoreAt(candles, ind, i);
       const dir = score >= 3 ? 1 : score <= -3 ? -1 : 0;
-      if (dir !== 0 && dir !== prevDir) {
-        markers.push(dir > 0
-          ? { time: candles[i].time, position: 'belowBar', color: '#22c55e', shape: 'arrowUp', text: 'BUY' }
-          : { time: candles[i].time, position: 'aboveBar', color: '#ef4444', shape: 'arrowDown', text: 'SELL' });
-      }
-      if (dir !== 0) prevDir = dir;
+      if (dir && dir !== prev) markers.push(dir > 0
+        ? { time: candles[i].time, position: 'belowBar', color: '#20b26c', shape: 'arrowUp', text: 'BUY' }
+        : { time: candles[i].time, position: 'aboveBar', color: '#f6465d', shape: 'arrowDown', text: 'SELL' });
+      if (dir) prev = dir;
     }
     return markers;
   }
 
   function settings() {
-    const deposit = Math.max(0, parseFloat($('deposit').value) || 0);
-    const riskPct = Math.min(10, Math.max(0.1, parseFloat($('risk').value) || 1));
-    return { deposit, riskPct };
+    return {
+      deposit: Math.max(0, parseFloat($('deposit').value) || 0),
+      riskPct: Math.min(10, Math.max(0.1, parseFloat($('risk').value) || 1)),
+    };
   }
 
   function renderPlan(entry, atrValue, v, score) {
     const { deposit, riskPct } = settings();
-    for (const k of ['stop', 'take']) if (stopLine[k]) { candleSeries.removePriceLine(stopLine[k]); stopLine[k] = null; }
+    while (planLines.length) candleSeries.removePriceLine(planLines.pop());
 
     if (v.dir <= 0) {
-      $('plan').innerHTML = `<div class="big ${v.dir < 0 ? 'neg' : 'neutral'}">0 $ — не входить</div>
-        <div class="note">${v.dir < 0
-          ? 'Индикаторы против покупки. Если монета уже есть — подумайте о фиксации или подтяните стоп.'
-          : 'Сигнал слабый. Лучше подождать более явной картины, чем гадать.'}</div>`;
+      const sell = v.dir < 0;
+      $('plan').innerHTML = `<div class="skip ${sell ? 'sell-bg' : 'neutral-bg'}">
+        <div><b class="${sell ? 'neg' : 'neutral'}">0 $ — не входить</b>
+        <p>${sell ? 'Индикаторы против покупки. Если монета уже есть — подумайте о фиксации прибыли или подтяните стоп.'
+                  : 'Сигнал слабый. Лучше дождаться явной картины, чем гадать.'}</p></div></div>`;
       return;
     }
     const strength = score >= 3 ? 1 : 0.5;
     const p = TA.positionPlan({ deposit, riskPct, entry, atrValue, strength });
-    stopLine.stop = candleSeries.createPriceLine({ price: p.stop, color: '#ef4444', lineStyle: 1, title: 'стоп' });
-    stopLine.take = candleSeries.createPriceLine({ price: p.take, color: '#22c55e', lineStyle: 1, title: 'тейк' });
+    planLines.push(
+      candleSeries.createPriceLine({ price: p.stop, color: '#f6465d', lineStyle: 2, lineWidth: 1, title: 'стоп' }),
+      candleSeries.createPriceLine({ price: p.take, color: '#20b26c', lineStyle: 2, lineWidth: 1, title: 'тейк' }),
+    );
     $('plan').innerHTML = `
-      <div class="big pos">${fmtMoney(p.amount)}</div>
-      <div class="note" style="margin-top:0">${((p.amount / deposit) * 100 || 0).toFixed(1)}% депозита · ${p.qty.toPrecision(5)} ${state.symbol.replace('USDT', '')}</div>
-      <dl class="kv" style="margin-top:10px">
-        <dt>Вход (рынок)</dt><dd>${fmtPrice(entry)}</dd>
-        <dt>Стоп-лосс</dt><dd class="neg">${fmtPrice(p.stop)} (−${p.stopPct.toFixed(2)}%)</dd>
-        <dt>Тейк-профит</dt><dd class="pos">${fmtPrice(p.take)} (+${p.takePct.toFixed(2)}%)</dd>
-        <dt>Потеря при стопе</dt><dd class="neg">−${fmtMoney(p.riskMoney)}</dd>
-        <dt>Прибыль при тейке</dt><dd class="pos">+${fmtMoney(p.riskMoney * 2)}</dd>
+      <div class="amount pos">${fmtMoney(p.amount)}</div>
+      <div class="amount-sub">${nf(1).format(deposit ? (p.amount / deposit) * 100 : 0)}% депозита · ${p.qty.toPrecision(5)} ${base(state.symbol)}</div>
+      <div class="ladder"><div class="l-risk"></div><div class="l-gain"></div></div>
+      <div class="ladder-marks">
+        <div><span class="neg">Стоп</span><b>${fmtPrice(p.stop)}</b><span class="neg">−${nf(2).format(p.stopPct)}%</span></div>
+        <div><span class="muted">Вход</span><b>${fmtPrice(entry)}</b></div>
+        <div><span class="pos">Тейк</span><b>${fmtPrice(p.take)}</b><span class="pos">+${nf(2).format(p.takePct)}%</span></div>
+      </div>
+      <dl class="kv">
+        <dt>Потеря, если сработает стоп</dt><dd class="neg">−${fmtMoney(p.riskMoney)}</dd>
+        <dt>Прибыль, если сработает тейк</dt><dd class="pos">+${fmtMoney(p.riskMoney * 2)}</dd>
       </dl>
-      <div class="note">Размер рассчитан так, чтобы при срабатывании стопа вы потеряли не больше
-        ${(riskPct * strength).toFixed(2)}% депозита${strength < 1 ? ' (половина риска — сигнал не самый сильный)' : ''}.
-        Стоп = 1.5×ATR, соотношение прибыль/риск 2:1.${p.capped ? ' Сумма ограничена всем депозитом (без плеча).' : ''}</div>`;
+      <div class="note">Сумма подобрана так, чтобы при стопе потерять не больше ${nf(2).format(riskPct * strength)}% депозита${strength < 1 ? ' — половина риска, сигнал не самый сильный' : ''}.
+        Стоп = 1,5×ATR, прибыль/риск 2:1.${p.capped ? ' Сумма ограничена депозитом (без плеча).' : ''}</div>`;
   }
 
   function renderBacktest(candles, ind) {
     const bt = TA.backtest(candles, ind, { threshold: 3 });
-    const days = ((candles.at(-1).time - candles[200].time) / 86400).toFixed(0);
+    const days = Math.round((candles.at(-1).time - candles[200].time) / 86400);
     if (!bt.trades.length) {
-      $('backtest').innerHTML = `<div class="note">За последние ~${days} дн. сильных сигналов на покупку не было.</div>`;
+      $('backtest').innerHTML = `<p class="muted" style="margin:0">За последние ~${days} дн. сильных сигналов на покупку не было.</p>`;
       return;
     }
     $('backtest').innerHTML = `
+      <div class="bt-top"><span class="bt-big ${cls(bt.totalPct)}">${fmtPct(bt.totalPct)}</span><span class="muted">за ~${days} дн.</span></div>
+      <div class="bar" title="Доля прибыльных сделок"><div style="width:${bt.winRate}%"></div></div>
       <dl class="kv">
-        <dt>Период</dt><dd>~${days} дн.</dd>
         <dt>Сделок по сигналу «ПОКУПАТЬ»</dt><dd>${bt.trades.length}</dd>
-        <dt>Прибыльных</dt><dd>${bt.wins} (${bt.winRate.toFixed(0)}%)</dd>
-        <dt>Итог по позиции</dt><dd class="${cls(bt.totalPct)}">${fmtPct(bt.totalPct)}</dd>
+        <dt>Прибыльных</dt><dd>${bt.wins} из ${bt.trades.length} (${bt.winRate.toFixed(0)}%)</dd>
       </dl>
-      <div class="note">Если бы вы входили по каждому сильному сигналу со стопом и тейком (с комиссией 0.1%).
-        При соотношении 2:1 стратегия в плюсе, если прибыльных больше ~34%. Прошлое не гарантирует будущее.</div>`;
+      <div class="note">Что было бы, если входить по каждому сильному сигналу со стопом и тейком (комиссия 0,1%).
+        При 2:1 стратегия в плюсе, если прибыльных больше ~34%. Прошлое не гарантирует будущее.</div>`;
   }
 
-  // ---------- живые обновления ----------
+  // ================= живые обновления =================
   function connectWs() {
     if (state.ws) { state.ws.onclose = null; state.ws.close(); }
-    const onCandle = (c) => {
-      const arr = state.candles;
-      if (!arr.length) return;
-      if (arr.at(-1).time === c.time) arr[arr.length - 1] = c;
-      else if (c.time > arr.at(-1).time) { arr.push(c); arr.shift(); render(true); return; }
-      const now = Date.now();
-      if (now - state.lastRender > 1000) { state.lastRender = now; render(false); }
-    };
-    const ws = ex().stream(state.symbol, state.interval, onCandle,
-      () => setStatus(`${ex().name} · онлайн · обновляется в реальном времени`, 'live'));
+    clearInterval(state.ping);
+    const ws = new WebSocket(WS_URL);
     state.ws = ws;
-    ws.onclose = () => { setStatus('соединение потеряно, переподключаюсь…'); setTimeout(connectWs, 3000); };
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ op: 'subscribe', args: [`kline.${IV[state.interval]}.${state.symbol}`] }));
+      state.ping = setInterval(() => ws.readyState === 1 && ws.send('{"op":"ping"}'), 20000);
+      setStatus('онлайн · Bybit в реальном времени', 'live');
+    };
+    ws.onmessage = (e) => {
+      const m = JSON.parse(e.data);
+      if (!m.topic || !m.data) return;
+      for (const k of m.data) onCandle(toCandle(k.start, k.open, k.high, k.low, k.close, k.volume));
+    };
+    ws.onclose = () => { clearInterval(state.ping); setStatus('соединение потеряно, переподключаюсь…'); setTimeout(connectWs, 3000); };
   }
 
-  function setStatus(text, kind = '') { $('status').textContent = text; $('status').className = 'status ' + kind; }
+  function onCandle(c) {
+    const arr = state.candles;
+    if (!arr.length) return;
+    if (arr.at(-1).time === c.time) arr[arr.length - 1] = c;
+    else if (c.time > arr.at(-1).time) { arr.push(c); arr.shift(); render(true); return; }
+    else return;
+    const now = Date.now();
+    if (now - state.lastRender > 1000) { state.lastRender = now; render(false); }
+  }
 
   async function loadMain() {
     setStatus('загрузка…');
+    renderTicker();
+    renderHero();
+    document.querySelectorAll('#tf button').forEach((b) => b.classList.toggle('active', b.dataset.tf === state.interval));
     try {
       state.candles = await fetchKlines(state.symbol, state.interval, 500);
       render(true);
-      chart.timeScale().setVisibleLogicalRange({ from: state.candles.length - 150, to: state.candles.length + 5 });
+      chart.timeScale().setVisibleLogicalRange({ from: state.candles.length - 140, to: state.candles.length + 6 });
       connectWs();
     } catch (e) {
-      const hint = state.exchange === 'bybit' && location.protocol === 'file:'
-        ? ' Запустите страницу через server.py (см. README) или выберите Binance.'
-        : ` Возможно, ${ex().name} недоступен из вашей сети.`;
-      setStatus(`Ошибка загрузки (${ex().name}): ${e.message}.${hint}`, 'err');
+      const hint = location.protocol === 'file:' ? ' Запустите через start.bat / server.py.' : ' Проверьте, что server.py запущен и Bybit доступен.';
+      setStatus(`Ошибка загрузки: ${e.message}.${hint}`, 'err');
     }
   }
 
-  // ---------- сканер ----------
+  function selectSymbol(sym) {
+    if (sym === state.symbol) return;
+    state.symbol = sym; store.set('symbol', sym);
+    loadMain();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  // ================= сканер =================
   async function scan() {
     const tbody = $('scanTable').querySelector('tbody');
-    tbody.innerHTML = `<tr><td colspan="8" class="zero">Сканирую ${SYMBOLS.length} монет…</td></tr>`;
+    $('scanBtn').classList.add('spin');
+    if (!tbody.children.length) tbody.innerHTML = `<tr class="skeleton"><td colspan="8">Сканирую ${SYMBOLS.length} монет…</td></tr>`;
     const { deposit, riskPct } = settings();
-    let tickers = {};
-    try { tickers = await ex().change24h(SYMBOLS); } catch { /* без суточного изменения */ }
 
     const rows = await Promise.all(SYMBOLS.map(async (sym) => {
       try {
@@ -280,33 +318,39 @@
         return { sym, price: candles[i].close, rsi: ind.rsi[i], score, v, plan };
       } catch { return null; }
     }));
+    $('scanBtn').classList.remove('spin');
 
     const ok = rows.filter(Boolean).sort((a, b) => b.score - a.score);
-    tbody.innerHTML = ok.map((r) => `
-      <tr data-sym="${r.sym}">
-        <td><b>${r.sym.replace('USDT', '')}</b></td>
-        <td>${fmtPrice(r.price)}</td>
-        <td class="${cls(tickers[r.sym] ?? 0)}">${tickers[r.sym] != null ? fmtPct(tickers[r.sym]) : '—'}</td>
-        <td>${r.rsi.toFixed(0)}</td>
-        <td class="${cls(r.score)}">${r.score > 0 ? '+' : ''}${r.score.toFixed(1)}</td>
-        <td class="${r.v.cls}">${r.v.label}</td>
-        <td>${r.plan ? fmtMoney(r.plan.amount) : '—'}</td>
-        <td>${r.plan ? `${fmtPrice(r.plan.stop)} / ${fmtPrice(r.plan.take)}` : '—'}</td>
-      </tr>`).join('') || `<tr><td colspan="8" class="neg">Не удалось загрузить данные</td></tr>`;
-    tbody.querySelectorAll('tr[data-sym]').forEach((tr) => tr.addEventListener('click', () => {
-      $('symbol').value = tr.dataset.sym; $('symbol').dispatchEvent(new Event('change'));
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    }));
+    tbody.innerHTML = ok.map((r) => {
+      const t = state.tickers[r.sym];
+      const w = Math.min(50, (Math.abs(r.score) / TA.MAX_SCORE) * 50);
+      const bar = r.score >= 0 ? `left:50%;width:${w}%;background:var(--green)` : `right:50%;width:${w}%;background:var(--red)`;
+      return `<tr data-sym="${r.sym}">
+        <td><div class="sc-coin">${icon(r.sym, 'sc-ico')}${base(r.sym)}</div></td>
+        <td class="r">${fmtPrice(r.price)}</td>
+        <td class="r ${t ? cls(t.chg) : ''}">${t ? fmtPct(t.chg) : '—'}</td>
+        <td class="r ${r.rsi < 30 ? 'pos' : r.rsi > 70 ? 'neg' : ''}">${r.rsi.toFixed(0)}</td>
+        <td><span class="sbar"><i style="${bar}"></i></span><span class="${cls(r.score)}">${r.score > 0 ? '+' : ''}${r.score.toFixed(1)}</span></td>
+        <td><span class="badge ${r.v.cls}">${r.v.label}</span></td>
+        <td class="r">${r.plan ? `<b class="pos">${fmtMoney(r.plan.amount)}</b>` : '<span class="muted">—</span>'}</td>
+        <td class="r">${r.plan ? `<span class="neg">${fmtPrice(r.plan.stop)}</span> / <span class="pos">${fmtPrice(r.plan.take)}</span>` : '<span class="muted">—</span>'}</td>
+      </tr>`;
+    }).join('') || `<tr class="skeleton"><td colspan="8" class="neg">Не удалось загрузить данные с Bybit</td></tr>`;
   }
+  $('scanTable').addEventListener('click', (e) => { const tr = e.target.closest('tr[data-sym]'); if (tr) selectSymbol(tr.dataset.sym); });
 
-  // ---------- события ----------
-  $('exchange').addEventListener('change', (e) => { state.exchange = e.target.value; save('exchange', state.exchange); loadMain(); scan(); });
-  $('symbol').addEventListener('change', (e) => { state.symbol = e.target.value; save('symbol', state.symbol); loadMain(); });
-  $('interval').addEventListener('change', (e) => { state.interval = e.target.value; save('interval', state.interval); loadMain(); scan(); });
-  for (const id of ['deposit', 'risk']) $(id).addEventListener('input', (e) => { save(id, e.target.value); render(false); });
+  // ================= события =================
+  $('tf').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-tf]');
+    if (!b || b.dataset.tf === state.interval) return;
+    state.interval = b.dataset.tf; store.set('interval', state.interval);
+    loadMain(); scan();
+  });
+  for (const id of ['deposit', 'risk']) $(id).addEventListener('input', (e) => { store.set(id, e.target.value); render(false); });
   $('scanBtn').addEventListener('click', scan);
-  setInterval(scan, 5 * 60 * 1000);
 
+  setInterval(refreshTickers, 15000);
+  setInterval(scan, 5 * 60 * 1000);
   loadMain();
-  scan();
+  refreshTickers().then(scan);
 })();
