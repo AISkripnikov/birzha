@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Биржевой помощник</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Биржевой помощник <span class="sub">крипта · Binance · свечи и индикаторы</span></h1>
+    <div class="status" id="status">загрузка…</div>
+  </header>
+
+  <section class="controls">
+    <label>Монета
+      <select id="symbol"></select>
+    </label>
+    <label>Таймфрейм
+      <select id="interval">
+        <option value="15m">15 минут</option>
+        <option value="1h">1 час</option>
+        <option value="4h" selected>4 часа</option>
+        <option value="1d">1 день</option>
+      </select>
+    </label>
+    <label>Депозит, USDT
+      <input id="deposit" type="number" min="0" step="10" value="1000">
+    </label>
+    <label>Риск на сделку, %
+      <input id="risk" type="number" min="0.1" max="10" step="0.1" value="1">
+    </label>
+  </section>
+
+  <main class="grid">
+    <div class="card chart-card">
+      <div class="card-title" id="chartTitle">График</div>
+      <div id="chart"></div>
+      <div id="rsiChart"></div>
+      <div class="legend">
+        <span class="sw" style="background:#f0b90b"></span>EMA20
+        <span class="sw" style="background:#3b82f6"></span>EMA50
+        <span class="sw" style="background:#a855f7"></span>EMA200
+        <span class="sw dashed"></span>Боллинджер
+        · нижняя панель — RSI(14)
+      </div>
+    </div>
+
+    <div class="side">
+      <div class="card" id="signalCard">
+        <div class="card-title">Сигнал сейчас</div>
+        <div class="verdict" id="verdict">—</div>
+        <div class="meter"><div id="meterFill"></div></div>
+        <div class="price" id="price"></div>
+        <ul class="reasons" id="reasons"></ul>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Сколько ставить</div>
+        <div id="plan"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Проверка на истории</div>
+        <div id="backtest"></div>
+      </div>
+    </div>
+  </main>
+
+  <section class="card">
+    <div class="card-title">Сканер рынка <span class="sub">— все монеты на выбранном таймфрейме, лучшие сверху</span>
+      <button id="scanBtn">Обновить</button>
+    </div>
+    <div class="table-wrap">
+      <table id="scanTable">
+        <thead><tr><th>Монета</th><th>Цена</th><th>24ч</th><th>RSI</th><th>Оценка</th><th>Сигнал</th><th>Сумма входа</th><th>Стоп / Тейк</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    ⚠️ Это не финансовая рекомендация. Индикаторы ошибаются часто, особенно на крипте. Сигналы — подсказка,
+    а не гарантия. Никогда не вкладывайте деньги, которые не готовы потерять, и всегда ставьте стоп-лосс.
+  </footer>
+
+  <script src="indicators.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
