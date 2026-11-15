@@ -49,6 +49,14 @@ def signal(bars, ind, i, p):
     return 0
 
 
+def round_qty(qty, step=1):
+    """Округляет количество вниз до шага: 1 контракт/лот или 0.0001 монеты."""
+    if qty <= 0:
+        return 0
+    n = int(qty / step + 1e-9) * step
+    return int(n) if step >= 1 else round(n, 8)
+
+
 class Book:
     """Позиции, сделки и капитал. Свечи подаются по одной: on_bar(тикер, bars, ind, i)."""
 
@@ -68,7 +76,8 @@ class Book:
         return p["dir"] * (price - p["entry"]) * p["qty"] * self.inst[s]["point_value"]
 
     def _cost(self, s, price, qty):
-        return price * self.inst[s]["point_value"] * qty * self.costs["commission"]
+        rate = self.inst[s].get("commission", self.costs["commission"])
+        return price * self.inst[s]["point_value"] * qty * rate
 
     def _margin(self, s, price, qty):
         return price * self.inst[s]["point_value"] * self.inst[s]["margin_rate"] * qty
@@ -79,11 +88,14 @@ class Book:
         by_risk = eq * self.risk["risk_per_trade"] / (self.p["stop_atr"] * atr_value * pv)
         used = sum(self._margin(x, q["entry"], q["qty"]) for x, q in self.pos.items())
         by_margin = (eq * self.risk["max_margin"] - used) / max(self._margin(s, price, 1), 1e-9)
-        return max(int(min(by_risk, by_margin)), 0)
+        qty = round_qty(min(by_risk, by_margin), self.inst[s].get("qty_step", 1))
+        if qty * price * pv < self.inst[s].get("min_notional_rub", 0):
+            return 0   # меньше минимального ордера биржи
+        return qty
 
     def _close(self, s, price, t, reason):
         p = self.pos.pop(s)
-        slip = price * self.costs["slippage"] * p["dir"]
+        slip = price * self.inst[s].get("slippage", self.costs["slippage"]) * p["dir"]
         price -= slip
         pnl = p["dir"] * (price - p["entry"]) * p["qty"] * self.inst[s]["point_value"] - self._cost(s, price, p["qty"])
         self.capital += pnl
@@ -103,7 +115,7 @@ class Book:
         # 1) вход по открытию (сигнал был на прошлой свече того же дня)
         sig = self.pending.pop(s, None)
         if sig and sig["date"] == b["date"] and s not in self.pos and bar_minutes(b) + p["timeframe"] <= hm(p["flat"]):
-            price = b["open"] * (1 + self.costs["slippage"] * sig["dir"])
+            price = b["open"] * (1 + self.inst[s].get("slippage", self.costs["slippage"]) * sig["dir"])
             qty = sig.get("qty") or self.contracts(s, price, sig["atr"])
             if qty > 0:
                 stop = sig.get("stop") or price - sig["dir"] * p["stop_atr"] * sig["atr"]
@@ -138,6 +150,8 @@ class Book:
         if s not in self.pos and self.day_trades.get(s, 0) < p["max_trades_per_day"] \
                 and self.equity() > self.day_start * (1 - self.risk["daily_loss_limit"]):
             d = signal(bars, ind, i, p)
+            if d < 0 and self.inst[s].get("long_only"):
+                d = 0   # спот и акции без маржи: шортить нельзя
             if d:
                 self.pending[s] = {"dir": d, "atr": ind["atr"][i], "date": b["date"], "t": b["t"],
                                    "close": b["close"]}

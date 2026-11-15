@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Birzha — фьючерсы</title>
+  <title>Birzha — сигналы</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
@@ -20,7 +20,7 @@
       </svg>
       <div>
         <div class="brand-name">Birzha</div>
-        <div class="brand-sub">внутридневные сигналы · фьючерсы Мосбиржи</div>
+        <div class="brand-sub">внутридневные сигналы · Мосбиржа и крипта</div>
       </div>
     </div>
     <div class="top-right">
@@ -29,6 +29,13 @@
     </div>
   </header>
 
+  <div class="filters">
+    <div class="seg" id="groups" role="tablist" aria-label="Рынок">
+      <button data-g="all">Все</button><button data-g="futures">Фьючерсы</button><button data-g="stock">Акции</button><button data-g="crypto">Крипта</button>
+    </div>
+    <label class="toggle"><input type="checkbox" id="fitOnly"><span></span>Только по карману</label>
+    <span class="muted small" id="fitInfo"></span>
+  </div>
   <nav class="ticker" id="ticker" aria-label="Инструменты"></nav>
 
   <section class="hero">
@@ -41,7 +48,8 @@
     </div>
     <div class="hero-stats">
       <div><span>ATR</span><b id="hAtr">—</b></div>
-      <div><span>₽ за пункт</span><b id="hPv">—</b></div>
+      <div><span id="hPvLbl">₽ за пункт</span><b id="hPv">—</b></div>
+      <div><span>Минимум по правилам</span><b id="hMin">—</b></div>
       <div><span>Последняя закрытая</span><b id="hLast">—</b></div>
     </div>
     <div class="seg" id="tf" role="tablist" aria-label="Свечи">
@@ -88,18 +96,29 @@
       </section>
 
       <section class="card plan">
-        <h2>Сколько контрактов</h2>
-        <label class="field-wrap"><span>Капитал на срочном рынке</span>
-          <div class="field"><input id="capital" type="number" min="10000" step="10000" inputmode="decimal"><em>₽</em></div>
-        </label>
+        <h2>Сколько брать</h2>
+        <div class="inputs">
+          <label class="field-wrap"><span>Ваш капитал</span>
+            <div class="field"><input id="capital" type="number" min="100" step="500" inputmode="decimal"><em>₽</em></div>
+          </label>
+          <label class="field-wrap"><span>Риск на сделку</span>
+            <div class="field"><input id="risk" type="number" min="0.1" max="5" step="0.1" inputmode="decimal"><em>%</em></div>
+          </label>
+        </div>
         <div id="plan"></div>
       </section>
     </aside>
   </main>
 
+  <section class="card venues">
+    <h2>Где торговать с верификацией гражданина РФ</h2>
+    <div class="venue-grid" id="venues"></div>
+    <div class="small-cap" id="smallCap"></div>
+  </section>
+
   <footer>
     Сайт только показывает данные и сигналы, заявки не отправляет. Это не финансовая рекомендация: внутри дня
-    комиссии и проскальзывание съедают значительную часть результата, фьючерсы торгуются с плечом.
+    комиссии и проскальзывание съедают значительную часть результата, фьючерсы торгуются с плечом, криптобиржи не защищены ЦБ.
   </footer>
 
   <script src="app.js"></script>
