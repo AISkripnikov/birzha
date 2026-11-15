@@ -131,7 +131,55 @@ def closed_bars(s, tf):
     return bars, (bars[:-1] if forming else bars), forming
 
 
-def item(s, tf, risk):
+def plan_qty(m, price, atr_value, capital, risk, p):
+    """Сколько контрактов/лотов/монет брать под капитал по правилам риска."""
+    pv = m["point_value"]
+    by_risk = capital * risk["risk_per_trade"] / (p["stop_atr"] * atr_value * pv)
+    by_margin = capital * risk["max_margin"] / (price * pv * m["margin_rate"])
+    qty = round_qty(min(by_risk, by_margin), m.get("qty_step", 1))
+    return 0 if qty * price * pv < m.get("min_notional_rub", 0) else qty
+
+
+def scan(s, m, p, closed, ind, now):
+    """Состояние стратегии на последней закрытой свече: можно ли входить прямо сейчас.
+
+    entry  — свеча только что закрылась пробоем: вход сейчас (до закрытия следующей свечи);
+    near   — тренд есть, до уровня пробоя меньше 0,5 ATR: готовьтесь;
+    hold   — стратегия уже в позиции (новый вход не нужен, ведём стоп);
+    wait   — условий нет.
+    """
+    if len(closed) <= max(p["ema_slow"], p["channel"], p["atr_period"]) + 1:
+        return {"state": "wait", "why": "мало данных"}
+    book = Book({s: m}, p, cfg.RISK, cfg.COSTS, 1e12)   # огромный капитал — смотрим только на правила входа
+    for i in range(len(closed)):
+        book.on_bar(s, closed, ind, i)
+    i = len(closed) - 1
+    c, f, sl, a = closed[i]["close"], ind["ema_fast"][i], ind["ema_slow"][i], ind["atr"][i]
+    ch = p["channel"]
+    up = max(b["high"] for b in closed[i - ch + 1:i + 1])
+    dn = min(b["low"] for b in closed[i - ch + 1:i + 1])
+    trend = 1 if c > sl and f > sl else -1 if c < sl and f < sl else 0
+    if trend < 0 and m.get("long_only"):
+        trend = 0
+    end = (datetime.strptime(closed[i]["t"], "%Y-%m-%d %H:%M") + timedelta(minutes=p["timeframe"] * 2))
+    fresh = now.replace(tzinfo=None) < end          # сигнал актуален, пока не закрылась следующая свеча
+    pend, pos = book.pending.get(s), book.pos.get(s)
+    out = {"trend": trend, "up": up, "dn": dn, "atr": a, "bar": closed[i]["t"]}
+    if pend and fresh:
+        d = pend["dir"]
+        return dict(out, state="entry", dir=d, entry=c, stop=c - d * p["stop_atr"] * a, since=pend["t"])
+    if pos:
+        return dict(out, state="hold", dir=pos["dir"], entry=pos["entry"], stop=pos["stop"], since=pos["t"])
+    if trend:
+        dist = (up - c) / a if trend > 0 else (c - dn) / a
+        level = up if trend > 0 else dn
+        if dist < 0.5:
+            return dict(out, state="near", dir=trend, level=level, dist=max(dist, 0))
+        return dict(out, state="wait", dir=trend, level=level, dist=dist)
+    return dict(out, state="wait", dir=0)
+
+
+def item(s, tf, risk, capital):
     m0 = MARKETS[s]
     base = {"symbol": s, "group": m0["group"], "market": m0["market"], "title": m0.get("title", "")}
     try:
@@ -145,15 +193,21 @@ def item(s, tf, risk):
         p = params(m, tf)
         ind = indicators(closed, p) if closed else {"atr": [None]}
         a = ind["atr"][-1] if ind["atr"] else None
+        sig = scan(s, m, p, closed, ind, now_msk()) if a else {"state": "wait"}
+        if sig.get("state") == "entry":
+            sig["qty"] = plan_qty(m, last["close"], a, capital, risk, p)
+            sig["unit"] = m["unit"]
         return dict(base, price=last["close"], chg=(last["close"] / ref - 1) * 100, t=last["t"],
-                    contract=m.get("contract"), min_capital=min_capital(m, last["close"], a, p, risk) if a else None)
+                    contract=m.get("contract"), signal=sig,
+                    min_capital=min_capital(m, last["close"], a, p, risk) if a else None)
     except Exception as e:
         return dict(base, error=f"{type(e).__name__}: {e}"[:160])
 
 
-def instruments(tf, risk):
-    items = list(POOL.map(lambda s: item(s, tf, risk), MARKETS))
-    return {"moex_source": SRC.moex_name, "usd_rub": usd_rub(), "items": items, "venues": VENUES}
+def instruments(tf, risk, capital):
+    items = list(POOL.map(lambda s: item(s, tf, risk, capital), MARKETS))
+    return {"moex_source": SRC.moex_name, "usd_rub": usd_rub(), "items": items, "venues": VENUES,
+            "now": now_msk().strftime("%H:%M:%S")}
 
 
 def state(s, tf, capital, risk):
@@ -204,11 +258,7 @@ def state(s, tf, capital, risk):
 
     pv, mr = m["point_value"], m["margin_rate"]
     stop_dist = p["stop_atr"] * a
-    by_risk = capital * risk["risk_per_trade"] / (stop_dist * pv)
-    by_margin = capital * risk["max_margin"] / (price * pv * mr)
-    qty = round_qty(min(by_risk, by_margin), m.get("qty_step", 1))
-    if qty * price * pv < m.get("min_notional_rub", 0):
-        qty = 0   # меньше минимального ордера биржи
+    qty = plan_qty(m, price, a, capital, risk, p)
 
     pos, pend = book.pos.get(s), book.pending.get(s)
     stats = [t["pnl"] for t in book.trades]
@@ -264,7 +314,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         tf = tf if tf in (10, 30, 60) else 30
         try:
             if url.path == "/api/instruments":
-                return self._json(instruments(tf, risk_from(q)))
+                capital = float(q.get("capital", 2000) or 2000)
+                return self._json(instruments(tf, risk_from(q), max(capital, 1)))
             if url.path == "/api/state":
                 s = q.get("symbol", "USDRUBF")
                 if s not in MARKETS:

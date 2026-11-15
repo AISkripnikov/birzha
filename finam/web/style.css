@@ -173,3 +173,50 @@ footer { margin-top: 20px; color: var(--muted); font-size: 12px; text-align: cen
 .small-cap li { margin: 4px 0; }
 @media (max-width: 900px) { .venue-grid { grid-template-columns: 1fr; } }
 @media (max-width: 640px) { .filters { gap: 10px; } .filters .seg button { padding: 7px 10px; } }
+
+/* ---------- куда входить ---------- */
+.entries { margin-bottom: 16px; }
+.entries-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.entries-head h2 { margin-bottom: 4px; }
+.entries-head p { margin: 0; }
+.btn { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--border); background: var(--card-2); color: var(--text);
+  font: inherit; font-weight: 600; font-size: 13px; padding: 8px 14px; border-radius: 10px; cursor: pointer; }
+.btn:hover { border-color: #2c3548; }
+.btn[aria-pressed="true"] { border-color: var(--green); color: var(--green); background: var(--green-bg); }
+.entry-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+.entry { position: relative; text-align: left; border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px 12px 16px;
+  background: var(--card-2); color: inherit; font: inherit; cursor: pointer; overflow: hidden; transition: transform .15s, border-color .15s; }
+.entry:hover { transform: translateY(-1px); }
+.entry::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; }
+.entry.long { border-color: rgba(32, 178, 108, .45); background: linear-gradient(90deg, rgba(32, 178, 108, .12), var(--card-2) 60%); }
+.entry.long::before { background: var(--green); }
+.entry.short { border-color: rgba(246, 70, 93, .45); background: linear-gradient(90deg, rgba(246, 70, 93, .12), var(--card-2) 60%); }
+.entry.short::before { background: var(--red); }
+.entry-top { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.entry-top .tk-ico { width: 26px; height: 26px; font-size: 11px; }
+.entry-sym { font-weight: 700; }
+.entry-dir { margin-left: auto; font-weight: 800; font-size: 13px; padding: 3px 10px; border-radius: 8px; letter-spacing: .02em; }
+.entry.long .entry-dir { background: var(--green); color: #06130c; }
+.entry.short .entry-dir { background: var(--red); color: #1a0508; }
+.entry-row { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); }
+.entry-row b { color: var(--text); font-weight: 600; }
+.entry-qty { margin-top: 8px; font-size: 12px; font-weight: 600; }
+.entry-qty.ok { color: var(--green); } .entry-qty.no { color: var(--red); }
+.entry-empty { color: var(--muted); font-size: 13px; padding: 4px 2px; }
+.near-list { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px; font-size: 12px; color: var(--muted); }
+.near-list:empty { display: none; }
+.chip.near { border-color: rgba(247, 166, 0, .45); }
+
+/* метки в ленте */
+.tk { position: relative; }
+.tk-sig { font-size: 10px; font-weight: 800; letter-spacing: .03em; padding: 2px 6px; border-radius: 6px; white-space: nowrap; }
+.tk-sig.long { background: var(--green); color: #06130c; } .tk-sig.short { background: var(--red); color: #1a0508; }
+.tk-sig.near { background: var(--amber-bg); color: var(--accent); } .tk-sig.hold { background: var(--card-2); color: var(--muted); border: 1px solid var(--border); }
+.tk.sig-long { border-color: var(--green); box-shadow: 0 0 0 1px rgba(32, 178, 108, .35), 0 0 18px rgba(32, 178, 108, .18); }
+.tk.sig-short { border-color: var(--red); box-shadow: 0 0 0 1px rgba(246, 70, 93, .35), 0 0 18px rgba(246, 70, 93, .18); }
+.tk.sig-long.active, .tk.sig-short.active { background: linear-gradient(180deg, rgba(247, 166, 0, .10), var(--card)); }
+@media (prefers-reduced-motion: no-preference) {
+  .tk.sig-long .tk-sig, .tk.sig-short .tk-sig, .entry-dir { animation: blink 1.6s ease-in-out infinite; }
+  @keyframes blink { 50% { opacity: .55; } }
+}
+@media (max-width: 640px) { .entry-list { grid-template-columns: 1fr; } .btn span { display: none; } }

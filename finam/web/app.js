@@ -21,11 +21,13 @@
   };
   const state = {
     symbol: store.get('w_symbol', 'CNYRUBF'), tf: +store.get('w_tf', 30), group: store.get('w_group', 'all'),
-    fitOnly: store.get('w_fit', '0') === '1', items: [], venues: null, data: null, key: '',
+    fitOnly: store.get('w_fit', '0') === '1', sigOnly: store.get('w_sig', '0') === '1', notify: store.get('w_notify', '0') === '1',
+    items: [], venues: null, data: null, key: '', seen: null,
   };
   $('capital').value = store.get('w_capital', '2000');
   $('risk').value = store.get('w_risk', '1');
   $('fitOnly').checked = state.fitOnly;
+  $('sigOnly').checked = state.sigOnly;
   const capital = () => Math.max(+$('capital').value || 2000, 1);
   const riskPct = () => Math.min(Math.max(+$('risk').value || 1, 0.1), 5);
 
@@ -104,7 +106,8 @@
   // ---------- лента и фильтры ----------
   const fits = (t) => t.min_capital != null && t.min_capital <= capital();
   function visibleItems() {
-    return state.items.filter((t) => (state.group === 'all' || t.market === state.group) && (!state.fitOnly || fits(t)));
+    const sigOk = (t) => ['entry', 'near'].includes(t.signal?.state);
+    return state.items.filter((t) => (state.group === 'all' || t.market === state.group) && (!state.fitOnly || fits(t)) && (!state.sigOnly || sigOk(t)));
   }
   function renderTicker() {
     let lastGroup = '';
@@ -114,13 +117,18 @@
       const head = t.group !== lastGroup ? `<span class="tk-group">${esc(t.group)}</span>` : '';
       lastGroup = t.group;
       const min = t.error ? '' : t.min_capital == null ? '' : `<span class="tk-min ${fits(t) ? 'ok' : 'no'}" title="Минимальный капитал по правилам риска">от ${compact(t.min_capital)}</span>`;
-      return `${head}<button class="tk ${t.symbol === state.symbol ? 'active' : ''} ${t.error ? 'dim' : ''}" data-sym="${t.symbol}" title="${esc(t.error || i.desc)}">
+      const sg = t.signal || {};
+      const sigCls = sg.state === 'entry' ? (sg.dir > 0 ? 'sig-long' : 'sig-short') : '';
+      const sigTag = sg.state === 'entry' ? `<span class="tk-sig ${sg.dir > 0 ? 'long' : 'short'}">ВХОД ${sg.dir > 0 ? '↑' : '↓'}</span>`
+        : sg.state === 'near' ? '<span class="tk-sig near">близко</span>'
+          : sg.state === 'hold' ? `<span class="tk-sig hold">в сделке ${sg.dir > 0 ? '↑' : '↓'}</span>` : '';
+      return `${head}<button class="tk ${t.symbol === state.symbol ? 'active' : ''} ${t.error ? 'dim' : ''} ${sigCls}" data-sym="${t.symbol}" title="${esc(t.error || i.desc)}">
         <span class="tk-ico" style="background:${i.color}">${esc(i.ico)}</span>
         <span><div class="tk-sym">${esc(t.contract || t.symbol)}</div><div class="tk-price">${t.error ? 'нет данных' : fp(t.price)}</div></span>
-        ${t.error ? '' : `<span class="tk-chg ${cls(t.chg)}">${pct(t.chg)}</span>`}${min}
+        ${t.error ? '' : `<span class="tk-chg ${cls(t.chg)}">${pct(t.chg)}</span>`}${sigTag || min}
       </button>`;
     }).join('');
-    $('ticker').innerHTML = html || `<span class="muted small" style="padding:10px 4px">${state.items.length ? 'Под этот капитал и риск ничего не подходит — увеличьте риск или капитал.' : 'Загружаю инструменты… первый раз до минуты.'}</span>`;
+    $('ticker').innerHTML = html || `<span class="muted small" style="padding:10px 4px">${state.items.length ? (state.sigOnly ? 'Сейчас нет сигналов по выбранным фильтрам.' : 'Под этот капитал и риск ничего не подходит — увеличьте риск или капитал.') : 'Загружаю инструменты… первый раз до минуты.'}</span>`;
     const ok = state.items.filter(fits).length;
     $('fitInfo').textContent = state.items.length ? `по правилам риска на ${rub(capital())} доступно: ${ok} из ${state.items.length}` : '';
   }
@@ -129,7 +137,7 @@
     state.symbol = sym; store.set('w_symbol', sym); renderTicker(); refresh(true);
   }
   $('ticker').addEventListener('click', (e) => { const b = e.target.closest('[data-sym]'); if (b) pick(b.dataset.sym); });
-  document.addEventListener('click', (e) => { const b = e.target.closest('.chip[data-sym]'); if (b) pick(b.dataset.sym); });
+  document.addEventListener('click', (e) => { const b = e.target.closest('.chip[data-sym], .entry[data-sym]'); if (b) pick(b.dataset.sym); });
 
   function segInit(id, attr, cur, onPick) {
     document.querySelectorAll(`#${id} button`).forEach((b) => {
@@ -140,9 +148,73 @@
       });
     });
   }
-  segInit('tf', 'tf', state.tf, (v) => { state.tf = +v; store.set('w_tf', v); refresh(true); refreshItems(); });
-  segInit('groups', 'g', state.group, (v) => { state.group = v; store.set('w_group', v); renderTicker(); });
+  segInit('tf', 'tf', state.tf, (v) => { state.tf = +v; store.set('w_tf', v); state.seen = null; refresh(true); refreshItems(); });
+  segInit('groups', 'g', state.group, (v) => { state.group = v; store.set('w_group', v); renderTicker(); renderEntries(); });
   $('fitOnly').addEventListener('change', () => { state.fitOnly = $('fitOnly').checked; store.set('w_fit', state.fitOnly ? '1' : '0'); renderTicker(); });
+  $('sigOnly').addEventListener('change', () => { state.sigOnly = $('sigOnly').checked; store.set('w_sig', state.sigOnly ? '1' : '0'); renderTicker(); });
+
+  // ---------- куда входить ----------
+  function since(t) {
+    const m = Math.round((Date.now() / 1000 - (Date.parse(t.replace(' ', 'T') + ':00+03:00') / 1000 + state.tf * 60)) / 60);
+    return m <= 0 ? 'только что' : m < 60 ? `${m} мин назад` : `${Math.floor(m / 60)} ч ${m % 60} мин назад`;
+  }
+  function renderEntries() {
+    if (!state.items.length) return;
+    const all = state.items.filter((t) => !t.error && (state.group === 'all' || t.market === state.group));
+    const entries = all.filter((t) => t.signal?.state === 'entry')
+      .sort((a, b) => (fits(b) - fits(a)) || a.symbol.localeCompare(b.symbol));
+    const near = all.filter((t) => t.signal?.state === 'near').sort((a, b) => a.signal.dist - b.signal.dist);
+    $('entriesSub').textContent = `Проверено ${all.length} инструментов на свечах ${state.tf} мин · вход актуален до закрытия следующей свечи`;
+    $('entryList').innerHTML = entries.map((t) => {
+      const i = info(t.symbol), g = t.signal, long = g.dir > 0;
+      const qtyTxt = g.qty > 0 ? `Под ваш капитал: ${qtyf(g.qty)} × ${esc(g.unit)}` : `Не по карману: нужно от ${compact(t.min_capital)}`;
+      return `<button class="entry ${long ? 'long' : 'short'}" data-sym="${t.symbol}">
+        <div class="entry-top"><span class="tk-ico" style="background:${i.color}">${esc(i.ico)}</span>
+          <span><div class="entry-sym">${esc(t.contract || t.symbol)}</div><div class="muted small">${esc(i.desc)}</div></span>
+          <span class="entry-dir">${long ? 'ЛОНГ ↑' : 'ШОРТ ↓'}</span></div>
+        <div class="entry-row"><span>Вход около</span><b>${fp(g.entry)}</b></div>
+        <div class="entry-row"><span>Стоп</span><b>${fp(g.stop)}</b></div>
+        <div class="entry-row"><span>Сигнал</span><b>${since(g.since)}</b></div>
+        <div class="entry-qty ${g.qty > 0 ? 'ok' : 'no'}">${qtyTxt}</div>
+      </button>`;
+    }).join('') || `<div class="entry-empty">Сейчас входов нет — это нормально, стратегия ждёт пробоя по тренду.${near.length ? ' Ближе всего к сигналу — ниже.' : ''}</div>`;
+    $('nearList').innerHTML = near.length ? `<span>Скоро может быть сигнал:</span>` + near.map((t) =>
+      `<button class="chip near" data-sym="${t.symbol}">${esc(t.contract || t.symbol)} ${t.signal.dir > 0 ? '↑ выше' : '↓ ниже'} ${fp(t.signal.level)}</button>`).join('') : '';
+    notifyNew(entries);
+  }
+
+  // ---------- уведомления ----------
+  function beep() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      [0, 0.18].forEach((t) => {
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.frequency.value = 880; g.gain.setValueAtTime(0.15, ctx.currentTime + t); g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + t + 0.15);
+        o.connect(g).connect(ctx.destination); o.start(ctx.currentTime + t); o.stop(ctx.currentTime + t + 0.16);
+      });
+    } catch { /* звук недоступен */ }
+  }
+  function notifyNew(entries) {
+    const keys = new Set(entries.map((t) => `${t.symbol}:${t.signal.since}:${t.signal.dir}`));
+    const fresh = state.seen ? entries.filter((t) => !state.seen.has(`${t.symbol}:${t.signal.since}:${t.signal.dir}`)) : [];
+    state.seen = keys;
+    if (!state.notify || !fresh.length) return;
+    beep();
+    const text = fresh.map((t) => `${t.contract || t.symbol}: ${t.signal.dir > 0 ? 'ЛОНГ' : 'ШОРТ'} около ${fp(t.signal.entry)}, стоп ${fp(t.signal.stop)}`).join('\n');
+    try { if (Notification.permission === 'granted') new Notification('Birzha: сигнал на вход', { body: text }); } catch { /* нет уведомлений */ }
+  }
+  function renderNotifyBtn() {
+    $('notifyBtn').setAttribute('aria-pressed', String(state.notify));
+    $('notifyBtn').querySelector('span').textContent = state.notify ? 'Уведомления включены' : 'Уведомлять о входах';
+  }
+  $('notifyBtn').addEventListener('click', async () => {
+    state.notify = !state.notify; store.set('w_notify', state.notify ? '1' : '0'); renderNotifyBtn();
+    if (state.notify) {
+      beep();
+      try { if ('Notification' in window && Notification.permission === 'default') await Notification.requestPermission(); } catch { /* нет уведомлений */ }
+    }
+  });
+  renderNotifyBtn();
   let tmr;
   const onMoney = () => {
     store.set('w_capital', $('capital').value); store.set('w_risk', $('risk').value);
@@ -307,9 +379,9 @@
   }
   async function refreshItems() {
     try {
-      const j = await get(`/api/instruments?tf=${state.tf}&risk=${riskPct()}`);
+      const j = await get(`/api/instruments?tf=${state.tf}&risk=${riskPct()}&capital=${capital()}`);
       state.items = j.items; state.venues = j.venues;
-      renderTicker(); renderVenues(state.data);
+      renderTicker(); renderEntries(); renderVenues(state.data);
       if (state.data) { renderHero(state.data); renderPlan(state.data); }
     } catch { /* не критично */ }
   }
@@ -320,5 +392,5 @@
   refreshItems();
   refresh(true);
   setInterval(() => refresh(false), 10000);
-  setInterval(refreshItems, 60000);
+  setInterval(refreshItems, 30000);
 })();

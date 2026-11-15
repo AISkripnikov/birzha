@@ -34,9 +34,25 @@
       <button data-g="all">Все</button><button data-g="futures">Фьючерсы</button><button data-g="stock">Акции</button><button data-g="crypto">Крипта</button>
     </div>
     <label class="toggle"><input type="checkbox" id="fitOnly"><span></span>Только по карману</label>
+    <label class="toggle"><input type="checkbox" id="sigOnly"><span></span>Только с сигналом</label>
     <span class="muted small" id="fitInfo"></span>
   </div>
   <nav class="ticker" id="ticker" aria-label="Инструменты"></nav>
+
+  <section class="card entries" id="entriesCard">
+    <div class="entries-head">
+      <div>
+        <h2>Куда можно входить сейчас</h2>
+        <p class="muted small" id="entriesSub">Проверяю все инструменты…</p>
+      </div>
+      <button class="btn" id="notifyBtn" type="button" aria-pressed="false">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>Уведомлять о входах</span>
+      </button>
+    </div>
+    <div class="entry-list" id="entryList"></div>
+    <div class="near-list" id="nearList"></div>
+  </section>
 
   <section class="hero">
     <div class="hero-main">
